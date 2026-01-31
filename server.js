@@ -11,7 +11,9 @@ const http = require('http');
 const PLACE_ID = '109983668079237';
 const ROBLOX_API = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public`;
 const PUSH_INTERVAL_MS = 10000;  // Envia servidores para os bots a cada 10s
-const FETCH_INTERVAL_MS = 5000;  // Atualiza lista do Roblox a cada 5s
+const FETCH_INTERVAL_MS = 10000; // Atualiza lista a cada 10s (fetch leva ~4s com 5 páginas)
+const MAX_SERVERS = 500;         // Busca até 500 servidores (5 páginas de 100)
+const DELAY_BETWEEN_PAGES_MS = 800;  // Delay entre páginas para evitar 429
 const PORT = process.env.PORT || 3000;
 
 const app = express();
@@ -33,17 +35,39 @@ function clearError() {
   lastError = null;
 }
 
-// Busca servidores na API do Roblox
+// Busca servidores na API do Roblox (paginado, até MAX_SERVERS)
 async function fetchServers() {
+  const all = [];
+  let cursor = null;
+  let pageCount = 0;
+  const maxPages = Math.ceil(MAX_SERVERS / 100);
+
   try {
-    const res = await fetch(`${ROBLOX_API}?sortOrder=Desc&limit=100`);
-    if (!res.ok) throw new Error(`Roblox API: ${res.status}`);
-    const json = await res.json();
-    serversCache = (json.data || [])
-      .filter(s => s.id)
-      .map(s => ({ id: s.id, serverId: s.id, JobId: s.id, maxPlayers: s.maxPlayers || 8, playing: s.playing || 0 }));
-    lastFetchAt = Date.now();
-    clearError();
+    while (all.length < MAX_SERVERS) {
+      const params = new URLSearchParams({ sortOrder: 'Desc', limit: '100' });
+      if (cursor) params.set('cursor', cursor);
+      const res = await fetch(`${ROBLOX_API}?${params}`);
+      if (res.status === 429) {
+        setError('Rate limit (429). Usando cache até próxima tentativa.');
+        console.warn('[fetch] Roblox API: 429. Mantendo cache.');
+        break;
+      }
+      if (!res.ok) throw new Error(`Roblox API: ${res.status}`);
+      const json = await res.json();
+      const page = (json.data || [])
+        .filter(s => s.id)
+        .map(s => ({ id: s.id, serverId: s.id, JobId: s.id, maxPlayers: s.maxPlayers || 8, playing: s.playing || 0 }));
+      all.push(...page);
+      pageCount++;
+      cursor = json.nextPageCursor || null;
+      if (!cursor || pageCount >= maxPages) break;
+      await new Promise(r => setTimeout(r, DELAY_BETWEEN_PAGES_MS));
+    }
+    if (all.length > 0) {
+      serversCache = all;
+      lastFetchAt = Date.now();
+      clearError();
+    }
     console.log(`[fetch] ${serversCache.length} servidores`);
     return serversCache;
   } catch (err) {

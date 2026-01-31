@@ -20,21 +20,34 @@ const wss = new WebSocketServer({ server, path: '/websocket/notifier' });
 
 let serversCache = [];
 let lastFetchAt = null;
+let lastError = null;
+let lastPushCount = 0;
+let lastPushAt = null;
 const clients = new Set();
+
+function setError(msg) {
+  lastError = { message: msg, at: new Date().toISOString() };
+}
+
+function clearError() {
+  lastError = null;
+}
 
 // Busca servidores na API do Roblox
 async function fetchServers() {
   try {
     const res = await fetch(`${ROBLOX_API}?sortOrder=Desc&limit=100`);
-    if (!res.ok) throw new Error(res.status);
+    if (!res.ok) throw new Error(`Roblox API: ${res.status}`);
     const json = await res.json();
     serversCache = (json.data || [])
       .filter(s => s.id)
       .map(s => ({ id: s.id, serverId: s.id, JobId: s.id, maxPlayers: s.maxPlayers || 8, playing: s.playing || 0 }));
     lastFetchAt = Date.now();
+    clearError();
     console.log(`[fetch] ${serversCache.length} servidores`);
     return serversCache;
   } catch (err) {
+    setError(`Falha ao buscar servidores: ${err.message}`);
     console.error('[fetch]', err.message);
     return serversCache;
   }
@@ -54,16 +67,31 @@ function getServers() {
 
 // Envia servidores para TODOS os clientes conectados
 function broadcastServers() {
-  const servers = getServers();
-  const msg = JSON.stringify({ type: 'new_servers', data: servers });
-  let count = 0;
-  clients.forEach(ws => {
-    if (ws.readyState === 1) {
-      ws.send(msg);
-      count++;
-    }
-  });
-  if (count > 0) console.log(`[push] Servidores enviados para ${count} cliente(s)`);
+  try {
+    const servers = getServers();
+    const msg = JSON.stringify({ type: 'new_servers', data: servers });
+    let count = 0;
+    let pushErrors = 0;
+    clients.forEach(ws => {
+      if (ws.readyState === 1) {
+        try {
+          ws.send(msg);
+          count++;
+        } catch (e) {
+          pushErrors++;
+        }
+      }
+    });
+    lastPushCount = count;
+    lastPushAt = Date.now();
+    if (pushErrors > 0) setError(`${pushErrors} bot(s) falhou ao enviar`);
+    else if (clients.size > 0 && count === 0) setError('Bots conectados mas nenhum recebeu (conexão fechada?)');
+    else clearError();
+    if (count > 0) console.log(`[push] Servidores enviados para ${count} cliente(s)`);
+  } catch (err) {
+    setError(`Erro ao distribuir: ${err.message}`);
+    console.error('[push]', err.message);
+  }
 }
 
 // WebSocket
@@ -87,10 +115,66 @@ wss.on('connection', (ws) => {
   ws.on('error', () => { clients.delete(ws); });
 });
 
-// HTTP
+// HTTP - Página de status com aviso de erros
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', placeId: PLACE_ID, clients: clients.size, lastFetch: lastFetchAt });
+  const hasError = lastError !== null;
+  const status = hasError ? 'erro' : 'ok';
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steal A Brainrot - WebSocket</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 500px; margin: 40px auto; padding: 20px; background: #1a1a1a; color: #eee; }
+    h1 { font-size: 1.2rem; margin-bottom: 20px; }
+    .card { background: #252525; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+    .status { display: inline-block; padding: 4px 10px; border-radius: 6px; font-weight: 600; }
+    .status.ok { background: #166534; color: #86efac; }
+    .status.erro { background: #991b1b; color: #fca5a5; }
+    .alerta { background: #7f1d1d; border: 1px solid #dc2626; color: #fecaca; padding: 12px; border-radius: 8px; margin-top: 12px; }
+    .alerta h3 { margin: 0 0 8px 0; color: #f87171; }
+    .info { color: #a3a3a3; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Steal A Brainrot - WebSocket API</h1>
+  <div class="card">
+    <span class="status ${status}">${hasError ? 'ERRO' : 'OK'}</span>
+    <p class="info" style="margin-top: 12px;">
+      Bots conectados: <strong>${clients.size}</strong><br>
+      Último fetch: ${lastFetchAt ? new Date(lastFetchAt).toLocaleString() : 'Nunca'}<br>
+      Último push: ${lastPushAt ? new Date(lastPushAt).toLocaleString() : 'Nunca'} → ${lastPushCount} bot(s)
+    </p>
+    ${hasError ? `
+    <div class="alerta">
+      <h3>⚠️ Aviso</h3>
+      <p>${lastError.message}</p>
+      <small>${lastError.at}</small>
+    </div>
+    ` : ''}
+  </div>
+</body>
+</html>`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
 });
+
+// JSON para APIs
+app.get('/api', (req, res) => {
+  res.json({
+    status: lastError ? 'erro' : 'ok',
+    placeId: PLACE_ID,
+    clients: clients.size,
+    lastFetch: lastFetchAt ? new Date(lastFetchAt).toISOString() : null,
+    lastPush: lastPushAt ? new Date(lastPushAt).toISOString() : null,
+    lastPushCount,
+    error: lastError ? { message: lastError.message, at: lastError.at } : null
+  });
+});
+
 app.get('/health', (req, res) => res.send('OK'));
 
 // Loop: busca Roblox a cada 5s, envia para bots a cada 10s

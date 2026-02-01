@@ -4,7 +4,11 @@
  * Deploy: Railway
  */
 
-require('dotenv').config();
+try { require('dotenv').config(); } catch (_) {}
+
+// Evita crash por rejeições não tratadas
+process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err?.message || err));
+
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
@@ -229,11 +233,18 @@ app.get('/api', (req, res) => {
 
 app.get('/health', (req, res) => res.send('OK'));
 
-// Loop: busca Roblox a cada 5s, envia para bots a cada 10s
-fetchServers().then(() => {
-  setInterval(fetchServers, FETCH_INTERVAL_MS);
-  setInterval(broadcastServers, PUSH_INTERVAL_MS);
-});
+// Loop: busca Roblox periodicamente, envia para bots a cada 10s
+fetchServers()
+  .then(() => {
+    setInterval(fetchServers, FETCH_INTERVAL_MS);
+    setInterval(broadcastServers, PUSH_INTERVAL_MS);
+    console.log('[server] Ciclo de fetch iniciado');
+  })
+  .catch(err => {
+    console.error('[server] Erro no fetch inicial:', err.message);
+    setInterval(fetchServers, FETCH_INTERVAL_MS);
+    setInterval(broadcastServers, PUSH_INTERVAL_MS);
+  });
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] Porta ${PORT} | Steal A Brainrot | Push a cada ${PUSH_INTERVAL_MS / 1000}s`);

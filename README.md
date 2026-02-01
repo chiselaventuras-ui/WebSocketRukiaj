@@ -14,6 +14,7 @@ WebSocket que busca servidores do jogo [Steal a Brainrot](https://www.roblox.com
 ### Variáveis de ambiente (opcional)
 
 - `PORT` - Railway define automaticamente
+- `ROBLOSECURITY` - Cookie de sessão do Roblox (obtido ao logar no site). **Pode aumentar o rate limit** da API. No Railway: Variables → Add `ROBLOSECURITY` = valor do cookie
 
 ## Uso com o Bot (Lua)
 

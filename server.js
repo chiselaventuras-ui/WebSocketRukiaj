@@ -4,6 +4,7 @@
  * Deploy: Railway
  */
 
+require('dotenv').config();
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
@@ -11,10 +12,14 @@ const http = require('http');
 const PLACE_ID = '109983668079237';
 const ROBLOX_API = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public`;
 const PUSH_INTERVAL_MS = 10000;  // Envia servidores para os bots a cada 10s
-const FETCH_INTERVAL_MS = 10000; // Atualiza lista a cada 10s (fetch leva ~4s com 5 páginas)
-const MAX_SERVERS = 500;         // Busca até 500 servidores (5 páginas de 100)
-const DELAY_BETWEEN_PAGES_MS = 800;  // Delay entre páginas para evitar 429
+const FETCH_INTERVAL_MS = 15000; // Atualiza lista a cada 15s (menos requisições = menos 429)
+const MAX_SERVERS = 300;         // 3 páginas (300 servidores) - estável, evita 429
+const DELAY_BETWEEN_PAGES_MS = 2500;  // 2.5s entre páginas - crucial para não ser bloqueado
+const RATE_LIMIT_COOLDOWN_MS = 25000;  // Ao receber 429, espera 25s antes de tentar de novo
 const PORT = process.env.PORT || 3000;
+
+// ROBLOSECURITY opcional: define no Railway para requests autenticados (pode ter limite maior)
+const ROBLOSECURITY = process.env.ROBLOSECURITY || null;
 
 const app = express();
 const server = http.createServer(app);
@@ -25,6 +30,7 @@ let lastFetchAt = null;
 let lastError = null;
 let lastPushCount = 0;
 let lastPushAt = null;
+let nextFetchAllowedAt = 0;  // Bloqueia fetch após 429 até passar o cooldown
 const clients = new Set();
 
 function setError(msg) {
@@ -35,24 +41,45 @@ function clearError() {
   lastError = null;
 }
 
-// Busca servidores na API do Roblox (paginado, até MAX_SERVERS)
+// Busca servidores na API do Roblox (paginado, com proteção contra 429)
 async function fetchServers() {
+  const now = Date.now();
+  if (now < nextFetchAllowedAt) {
+    return serversCache;  // Respeita cooldown após 429
+  }
+
   const all = [];
   let cursor = null;
   let pageCount = 0;
   const maxPages = Math.ceil(MAX_SERVERS / 100);
 
+  const fetchOpts = {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Accept': 'application/json',
+    },
+  };
+  if (ROBLOSECURITY) {
+    fetchOpts.headers['Cookie'] = `.ROBLOSECURITY=${ROBLOSECURITY}`;
+    fetchOpts.headers['Origin'] = 'https://www.roblox.com';
+    fetchOpts.headers['Referer'] = 'https://www.roblox.com/';
+  }
+
   try {
     while (all.length < MAX_SERVERS) {
       const params = new URLSearchParams({ sortOrder: 'Desc', limit: '100' });
       if (cursor) params.set('cursor', cursor);
-      const res = await fetch(`${ROBLOX_API}?${params}`);
+      const res = await fetch(`${ROBLOX_API}?${params}`, fetchOpts);
+
       if (res.status === 429) {
-        setError('Rate limit (429). Usando cache até próxima tentativa.');
-        console.warn('[fetch] Roblox API: 429. Mantendo cache.');
+        await res.text();
+        nextFetchAllowedAt = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+        setError(`Rate limit (429). Aguardando ${RATE_LIMIT_COOLDOWN_MS / 1000}s.`);
+        console.warn(`[fetch] Roblox API: 429. Cooldown de ${RATE_LIMIT_COOLDOWN_MS / 1000}s.`);
         break;
       }
       if (!res.ok) throw new Error(`Roblox API: ${res.status}`);
+
       const json = await res.json();
       const page = (json.data || [])
         .filter(s => s.id)
@@ -61,6 +88,7 @@ async function fetchServers() {
       pageCount++;
       cursor = json.nextPageCursor || null;
       if (!cursor || pageCount >= maxPages) break;
+
       await new Promise(r => setTimeout(r, DELAY_BETWEEN_PAGES_MS));
     }
     if (all.length > 0) {
